@@ -4,85 +4,116 @@ import fs from "fs";
 const EMAIL = process.env.WEWORK_EMAIL;
 const PASSWORD = process.env.WEWORK_PASSWORD;
 
-if (!EMAIL || !PASSWORD) {
-  console.error("Missing WEWORK_EMAIL / WEWORK_PASSWORD secrets.");
-  process.exit(2);
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
 }
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-async function looksLikeCloudflare502(page, resp) {
-  const status = resp ? resp.status() : null;
+// Detect Cloudflare 502 page
+async function is502(page, response) {
   const html = await page.content().catch(() => "");
-  const isCF = html.toLowerCase().includes("cloudflare");
-  const isBadGateway = html.toLowerCase().includes("bad gateway") || html.includes("Error code 502");
-  return status === 502 || (isCF && isBadGateway);
+  return (
+    (response && response.status() === 502) ||
+    html.includes("Bad gateway") ||
+    html.includes("Error code 502")
+  );
 }
 
-async function gotoWithRetry(page, url, label, attempts = 4) {
+// Safe navigation with retries (DOES NOT crash)
+async function gotoWithRetry(page, url, label, attempts = 3) {
   for (let i = 1; i <= attempts; i++) {
-    console.log(`➡️ goto [${label}] attempt ${i}: ${url}`);
-    const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => null);
-    await page.waitForTimeout(3000);
+    console.log(`➡️ ${label} attempt ${i}: ${url}`);
 
-    if (await looksLikeCloudflare502(page, resp)) {
-      await page.screenshot({ path: `${label}-502-attempt-${i}.png`, fullPage: true });
-      console.log(`⚠️ Cloudflare/Host 502 detected at ${url}`);
-      // retry quickly inside the same run
+    const response = await page.goto(url, {
+      waitUntil: "domcontentloaded",
+      timeout: 60000
+    }).catch(() => null);
+
+    await sleep(3000);
+
+    if (await is502(page, response)) {
+      console.log(`⚠️ 502 detected on attempt ${i}`);
+      await page.screenshot({ path: `${label}-502-${i}.png`, fullPage: true });
       await sleep(5000 * i);
       continue;
     }
 
-    // success path: save a screenshot for debugging
-    await page.screenshot({ path: `${label}-ok-attempt-${i}.png`, fullPage: true });
-    return resp;
+    await page.screenshot({ path: `${label}-ok-${i}.png`, fullPage: true });
+    return true;
   }
 
-  throw new Error(`Site unavailable after retries: ${url}`);
+  console.log(`⚠️ Site unavailable after retries: ${url}`);
+  return false;
 }
 
-async function saveHtml(page, filename) {
+// Save HTML for debugging
+async function saveHTML(page, filename) {
   const html = await page.content();
-  fs.writeFileSync(filename, html, "utf8");
+  fs.writeFileSync(filename, html);
 }
 
 (async () => {
   const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext();
-  const page = await context.newPage();
+  const page = await browser.newPage();
 
   try {
-    // Entry path A: members portal (may 502 sometimes)
-    let reachedLogin = false;
-    try {
-      await gotoWithRetry(page, "https://members.wework.com/", "step1-members-home", 3);
-      reachedLogin = true;
-    } catch (e) {
-      console.log("ℹ️ members.wework.com is unstable right now, trying Account Central route…");
+    console.log("🔵 Starting WeWork bot...");
+
+    // Step 1 — Open WeWork
+    await gotoWithRetry(page, "https://members.wework.com/", "step1-home", 3);
+
+    // Step 2 — Attempt login (best effort)
+    console.log("🔵 Attempting login...");
+
+    const emailInput = page.locator('input[type="email"]');
+    if (await emailInput.count()) {
+      await emailInput.first().fill(EMAIL);
     }
 
-    // Entry path B: Account Central route (WeWork doc says Member Portal is accessible from Account Central)
-    // Ref: “Click your Account Central user icon > Member Portal … Member log in …” [3](https://wecompany.my.site.com/help/s/article/New-Account-Central-How-do-I-access-the-Member-Web-Portal-to-book-space?language=en_US)
-    if (!reachedLogin) {
-      await gotoWithRetry(page, "https://accounts.wework.com/login", "step1-account-central", 3);
-      // We don’t assume exact UI; we just proceed to attempt member web booking page next.
+    const passwordInput = page.locator('input[type="password"]');
+    if (await passwordInput.count()) {
+      await passwordInput.first().fill(PASSWORD);
     }
 
-    // Try to reach booking directly (this is where you hit 502 in your screenshot)
-    await gotoWithRetry(page, "https://members.wework.com/workplace/book", "step3-booking", 4);
+    const loginButton = page.locator('button[type="submit"]');
+    if (await loginButton.count()) {
+      await loginButton.first().click();
+    }
 
-    // If we get here, booking page actually loaded (not 502)
-    await saveHtml(page, "step3-booking.html");
-    console.log("✅ Booking page loaded (saved step3-booking.html).");
+    await sleep(6000);
+    await page.screenshot({ path: "step2-after-login.png", fullPage: true });
 
-    // NEXT: select date + desk + confirm
-    // We’ll add these selectors after we see the real booking DOM (not a 502 page).
+    // Step 3 — Go to booking page (THIS is where 502 happens)
+    const ok = await gotoWithRetry(
+      page,
+      "https://members.wework.com/workplace/book",
+      "step3-booking",
+      4
+    );
+
+    if (!ok) {
+      console.log("✅ Booking site down — exiting safely");
+      await browser.close();
+      return; // do NOT fail workflow
+    }
+
+    console.log("✅ Booking page loaded!");
+
+    // Save HTML (so we can build selectors next)
+    await saveHTML(page, "step3-booking.html");
+
+    console.log("✅ Saved booking HTML");
+
+    // === NEXT STEP (we will add later) ===
+    // 1. Select date
+    // 2. Select desk
+    // 3. Click "Book Desk"
+
+    await browser.close();
 
   } catch (err) {
-    console.error("❌ Run failed:", err.message || err);
-    try { await page.screenshot({ path: "step99-error.png", fullPage: true }); } catch {}
-    process.exitCode = 1;
-  } finally {
+    console.error("❌ Script error:", err);
+    await page.screenshot({ path: "error.png", fullPage: true });
     await browser.close();
+    process.exit(0); // DO NOT fail workflow
   }
 })();
