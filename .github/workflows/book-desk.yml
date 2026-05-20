@@ -3,13 +3,9 @@ name: WeWork Desk Booker
 on:
   workflow_dispatch:
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -18,28 +14,23 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "24"
+          node-version: "20"
 
       - name: Install dependencies
         run: npm install playwright
 
-      - name: Install Playwright browser + deps
-        run: npx playwright install --with-deps chromium
+      - name: Install browser
+        run: npx playwright install chromium
 
-      - name: Run booking script
+      - name: Run script
         env:
           WEWORK_EMAIL: ${{ secrets.WEWORK_EMAIL }}
           WEWORK_PASSWORD: ${{ secrets.WEWORK_PASSWORD }}
         run: node bookDesk.js
 
-     
-- name: Upload run artifacts
+      - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: wework-run-artifacts
-          path: |
-            *.png
-            *.html
-          if-no-files-found: ignore
-``
+          path: "*.png"
