@@ -32,10 +32,14 @@ jobs:
           WEWORK_PASSWORD: ${{ secrets.WEWORK_PASSWORD }}
         run: node bookDesk.js
 
-      - name: Upload run artifacts (screenshots)
+     
+- name: Upload run artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: wework-run-artifacts
-          path: "*.png"
+          path: |
+            *.png
+            *.html
           if-no-files-found: ignore
+``
